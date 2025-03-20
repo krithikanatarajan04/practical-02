@@ -1,42 +1,71 @@
 ## DS 4300 Example - from docs
-
-import ollama
-import qdrant
+import qdrant_client
+from qdrant_client.models import VectorParams, Distance, PointStruct
 import numpy as np
 import os
 import fitz
 
-# Initialize Redis connection
-redis_client = redis.Redis(host="localhost", port=6379, db=0)
+# Initialize Qdrant client
+client = qdrant_client.QdrantClient(host="localhost", port=6333)
 
 VECTOR_DIM = 768
-INDEX_NAME = "embedding_index"
-DOC_PREFIX = "doc:"
-DISTANCE_METRIC = "COSINE"
+COLLECTION_NAME = "embedding_collection"
+DISTANCE_METRIC = Distance.COSINE
 
 
-# used to clear the redis vector store
-def clear_redis_store():
-    print("Clearing existing Redis store...")
-    redis_client.flushdb()
-    print("Redis store cleared.")
+# used to clear the Qdrant collection
+def clear_qdrant_store():
+    print("Clearing existing Qdrant collection...")
+    client.delete_collection(collection_name=COLLECTION_NAME)
+    print("Qdrant collection cleared.")
 
 
-# Create an HNSW index in Redis
-def create_hnsw_index():
+# Create a collection in Qdrant
+def create_qdrant_collection():
     try:
-        redis_client.execute_command(f"FT.DROPINDEX {INDEX_NAME} DD")
-    except redis.exceptions.ResponseError:
-        pass
+        client.delete_collection(collection_name=COLLECTION_NAME)
+    except Exception as e:
+        print(f"Error deleting collection: {e}")
 
-    redis_client.execute_command(
-        f"""
-        FT.CREATE {INDEX_NAME} ON HASH PREFIX 1 {DOC_PREFIX}
-        SCHEMA text TEXT
-        embedding VECTOR HNSW 6 DIM {VECTOR_DIM} TYPE FLOAT32 DISTANCE_METRIC {DISTANCE_METRIC}
-        """
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=VectorParams(
+            size=VECTOR_DIM,  # Dimension of the vector
+            distance=Distance.COSINE,  # Type of distance metric
+        ),
     )
-    print("Index created successfully.")
+    print("Qdrant collection created successfully.")
+
+
+# Example function to insert a document and its embedding into Qdrant
+def insert_document_to_qdrant(doc_id, text, embedding):
+    point = PointStruct(id=doc_id, vector=embedding, payload={"text": text})
+    client.upsert(
+        collection_name=COLLECTION_NAME,
+        points=[point]
+    )
+    print(f"Document {doc_id} inserted into Qdrant.")
+
+
+# Example usage of inserting a document with its vector embedding
+def insert_sample_document():
+    doc_id = 1  # Example document ID
+    text = "This is an example document."
+    embedding = np.random.rand(VECTOR_DIM).astype(np.float32)  # Example random embedding
+
+    insert_document_to_qdrant(doc_id, text, embedding)
+
+
+# Example function to query Qdrant collection for similar vectors
+def query_qdrant(query_vector, top_k=5):
+    results = client.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=query_vector,
+        limit=top_k,
+    )
+
+    for result in results:
+        print(f"Found document ID {result.id}, score {result.score}")
 
 
 # Generate an embedding using nomic-embed-text

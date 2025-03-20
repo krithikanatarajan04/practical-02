@@ -1,42 +1,28 @@
 ## DS 4300 Example - from docs
 
 import ollama
-import chroma
+import chromadb
 import numpy as np
 import os
 import fitz
 
-# Initialize Chroma connection
-chroma_client = redis.Redis(host="localhost", port=6379, db=0)
+# Initialize Chroma client
+db = chromadb.PersistentClient(path="./chroma_db")
+collection = db.get_or_create_collection(name="embedding_index")
 
 VECTOR_DIM = 768
-INDEX_NAME = "embedding_index"
-DOC_PREFIX = "doc:"
-DISTANCE_METRIC = "COSINE"
 
+# Used to clear the Chroma database
+def clear_chroma_store():
+    print("Clearing existing Chroma store...")
+    db.delete_collection("embedding_index")
+    print("Chroma store cleared.")
 
-# used to clear the redis vector store
-def clear_redis_store():
-    print("Clearing existing Redis store...")
-    redis_client.flushdb()
-    print("Redis store cleared.")
-
-
-# Create an HNSW index in Redis
-def create_hnsw_index():
-    try:
-        redis_client.execute_command(f"FT.DROPINDEX {INDEX_NAME} DD")
-    except redis.exceptions.ResponseError:
-        pass
-
-    redis_client.execute_command(
-        f"""
-        FT.CREATE {INDEX_NAME} ON HASH PREFIX 1 {DOC_PREFIX}
-        SCHEMA text TEXT
-        embedding VECTOR HNSW 6 DIM {VECTOR_DIM} TYPE FLOAT32 DISTANCE_METRIC {DISTANCE_METRIC}
-        """
-    )
-    print("Index created successfully.")
+# Function to create a new collection (equivalent to an index)
+def create_collection():
+    global collection
+    collection = db.get_or_create_collection(name="embedding_index")
+    print("Collection created successfully.")
 
 
 # Generate an embedding using nomic-embed-text
@@ -46,19 +32,13 @@ def get_embedding(text: str, model: str = "nomic-embed-text") -> list:
     return response["embedding"]
 
 
-# store the embedding in Redis
+# Store the embedding in Chroma
 def store_embedding(file: str, page: str, chunk: str, embedding: list):
-    key = f"{DOC_PREFIX}:{file}_page_{page}_chunk_{chunk}"
-    redis_client.hset(
-        key,
-        mapping={
-            "file": file,
-            "page": page,
-            "chunk": chunk,
-            "embedding": np.array(
-                embedding, dtype=np.float32
-            ).tobytes(),  # Store as byte array
-        },
+    key = f"{file}_page_{page}_chunk_{chunk}"
+    collection.add(
+        ids=[key],
+        embeddings=[embedding],
+        metadatas=[{"file": file, "page": page, "chunk": chunk}]
     )
     print(f"Stored embedding for: {chunk}")
 
@@ -107,31 +87,26 @@ def process_pdfs(data_dir):
             print(f" -----> Processed {file_name}")
 
 
-def query_redis(query_text: str):
-    q = (
-        Query("*=>[KNN 5 @embedding $vec AS vector_distance]")
-        .sort_by("vector_distance")
-        .return_fields("id", "vector_distance")
-        .dialect(2)
-    )
+# Query Chroma for similar embeddings
+def query_chroma(query_text: str):
     query_text = "Efficient search in vector databases"
     embedding = get_embedding(query_text)
-    res = redis_client.ft(INDEX_NAME).search(
-        q, query_params={"vec": np.array(embedding, dtype=np.float32).tobytes()}
+    results = collection.query(
+        query_embeddings=[embedding],
+        n_results=5
     )
-    # print(res.docs)
 
-    for doc in res.docs:
-        print(f"{doc.id} \n ----> {doc.vector_distance}\n")
+    for i, (doc_id, distance) in enumerate(zip(results["ids"][0], results["distances"][0])):
+        print(f"{doc_id} \n ----> {distance}\n")
 
 
 def main():
-    clear_redis_store()
-    create_hnsw_index()
+    clear_chroma_store()
+    create_collection()
 
     process_pdfs("../data/")
     print("\n---Done processing PDFs---\n")
-    query_redis("What is the capital of France?")
+    query_chroma("What is the capital of France?")
 
 
 if __name__ == "__main__":
