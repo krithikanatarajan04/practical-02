@@ -1,82 +1,58 @@
-import redis
 import json
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import ollama
 from redis.commands.search.query import Query
 from redis.commands.search.field import VectorField, TextField
+import chromadb
 
-
-# Initialize models
-# embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-redis_client = redis.StrictRedis(host="localhost", port=6379, decode_responses=True)
+# Initialize Chroma client
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+collection = chroma_client.get_or_create_collection(name="embedding_index")
 
 VECTOR_DIM = 768
-INDEX_NAME = "embedding_index"
-DOC_PREFIX = "doc:"
-DISTANCE_METRIC = "COSINE"
-
-# def cosine_similarity(vec1, vec2):
-#     """Calculate cosine similarity between two vectors."""
-#     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
 
 def get_embedding(text: str, model: str = "nomic-embed-text") -> list:
-
     response = ollama.embeddings(model=model, prompt=text)
     return response["embedding"]
 
 
 def search_embeddings(query, top_k=3):
-
     query_embedding = get_embedding(query)
-
-    # Convert embedding to bytes for Redis search
-    query_vector = np.array(query_embedding, dtype=np.float32).tobytes()
-
+    
     try:
-        # Construct the vector similarity search query
-        # Use a more standard RediSearch vector search syntax
-        # q = Query("*").sort_by("embedding", query_vector)
-
-        q = (
-            Query("*=>[KNN 5 @embedding $vec AS vector_distance]")
-            .sort_by("vector_distance")
-            .return_fields("id", "file", "page", "chunk", "vector_distance")
-            .dialect(2)
+        # Perform vector similarity search in ChromaDB
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k
         )
-
-        # Perform the search
-        results = redis_client.ft(INDEX_NAME).search(
-            q, query_params={"vec": query_vector}
-        )
-
+        
         # Transform results into the expected format
-        top_results = [
-            {
-                "file": result.file,
-                "page": result.page,
-                "chunk": result.chunk,
-                "similarity": result.vector_distance,
-            }
-            for result in results.docs
-        ][:top_k]
-
+        top_results = []
+        for i, doc_id in enumerate(results["ids"][0]):
+            metadata = results["metadatas"][0][i]
+            similarity = results["distances"][0][i]
+            top_results.append({
+                "file": metadata.get("file", "Unknown file"),
+                "page": metadata.get("page", "Unknown page"),
+                "chunk": metadata.get("chunk", "Unknown chunk"),
+                "similarity": similarity,
+            })
+        
         # Print results for debugging
         for result in top_results:
             print(
-                f"---> File: {result['file']}, Page: {result['page']}, Chunk: {result['chunk']}"
+                f"---> File: {result['file']}, Page: {result['page']}, Chunk: {result['chunk']}, Similarity: {result['similarity']:.4f}"
             )
-
+        
         return top_results
-
     except Exception as e:
         print(f"Search error: {e}")
         return []
 
 
 def generate_rag_response(query, context_results):
-
     # Prepare context string
     context_str = "\n".join(
         [
@@ -85,9 +61,9 @@ def generate_rag_response(query, context_results):
             for result in context_results
         ]
     )
-
+    
     print(f"context_str: {context_str}")
-
+    
     # Construct prompt with context
     prompt = f"""You are a helpful AI assistant. 
     Use the following context to answer the query as accurately as possible. If the context is 
@@ -99,12 +75,12 @@ Context:
 Query: {query}
 
 Answer:"""
-
+    
     # Generate response using Ollama
     response = ollama.chat(
         model="llama3.2:latest", messages=[{"role": "user", "content": prompt}]
     )
-
+    
     return response["message"]["content"]
 
 
@@ -115,19 +91,18 @@ def interactive_search():
 
     while True:
         query = input("\nEnter your search query: ")
-
+        
         if query.lower() == "exit":
             break
-
+        
         # Search for relevant embeddings
         context_results = search_embeddings(query)
-
+        
         # Generate RAG response
         response = generate_rag_response(query, context_results)
-
+        
         print("\n--- Response ---")
         print(response)
-
 
 
 if __name__ == "__main__":

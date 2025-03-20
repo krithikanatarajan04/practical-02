@@ -7,21 +7,21 @@ import os
 import fitz
 
 # Initialize Chroma client
-db = chromadb.PersistentClient(path="./chroma_db")
-collection = db.get_or_create_collection(name="embedding_index")
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+collection = chroma_client.get_or_create_collection(name="embedding_index")
 
 VECTOR_DIM = 768
 
 # Used to clear the Chroma database
 def clear_chroma_store():
     print("Clearing existing Chroma store...")
-    db.delete_collection("embedding_index")
+    chroma_client.delete_collection("embedding_index")
     print("Chroma store cleared.")
 
 # Function to create a new collection (equivalent to an index)
 def create_collection():
     global collection
-    collection = db.get_or_create_collection(name="embedding_index")
+    collection = chroma_client.get_or_create_collection(name="embedding_index")
     print("Collection created successfully.")
 
 
