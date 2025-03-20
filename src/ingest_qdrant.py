@@ -1,12 +1,13 @@
 ## DS 4300 Example - from docs
-import qdrant_client
+from qdrant_client import QdrantClient
+import ollama
 from qdrant_client.models import VectorParams, Distance, PointStruct
 import numpy as np
 import os
 import fitz
 
 # Initialize Qdrant client
-client = qdrant_client.QdrantClient(host="localhost", port=6333)
+client = QdrantClient(host="localhost", port=6333)
 
 VECTOR_DIM = 768
 COLLECTION_NAME = "embedding_collection"
@@ -75,19 +76,21 @@ def get_embedding(text: str, model: str = "nomic-embed-text") -> list:
     return response["embedding"]
 
 
-# store the embedding in Redis
 def store_embedding(file: str, page: str, chunk: str, embedding: list):
-    key = f"{DOC_PREFIX}:{file}_page_{page}_chunk_{chunk}"
-    redis_client.hset(
-        key,
-        mapping={
-            "file": file,
-            "page": page,
-            "chunk": chunk,
-            "embedding": np.array(
-                embedding, dtype=np.float32
-            ).tobytes(),  # Store as byte array
-        },
+    vector = np.array(embedding, dtype=np.float32).tolist()
+
+    # Ensure a positive integer ID
+    point_id = abs(hash(f"{file}_page_{page}_chunk_{chunk}"))
+
+    client.upsert(
+        collection_name=COLLECTION_NAME,
+        points=[
+            PointStruct(
+                id=point_id,
+                vector=vector,
+                payload={"file": file, "page": page, "chunk": chunk},
+            )
+        ]
     )
     print(f"Stored embedding for: {chunk}")
 
@@ -136,31 +139,29 @@ def process_pdfs(data_dir):
             print(f" -----> Processed {file_name}")
 
 
-def query_redis(query_text: str):
-    q = (
-        Query("*=>[KNN 5 @embedding $vec AS vector_distance]")
-        .sort_by("vector_distance")
-        .return_fields("id", "vector_distance")
-        .dialect(2)
-    )
-    query_text = "Efficient search in vector databases"
-    embedding = get_embedding(query_text)
-    res = redis_client.ft(INDEX_NAME).search(
-        q, query_params={"vec": np.array(embedding, dtype=np.float32).tobytes()}
-    )
-    # print(res.docs)
+def query_qdrant(query_text: str):
+    embedding = get_embedding(query_text)  # Convert text to vector
+    vector = np.array(embedding, dtype=np.float32).tolist()  # Convert to list
 
-    for doc in res.docs:
-        print(f"{doc.id} \n ----> {doc.vector_distance}\n")
+    # Perform vector search in Qdrant
+    search_results = client.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=vector,
+        limit=5,  # Get top 5 results
+        with_payload=True  # Retrieve metadata
+    )
 
+    # Print results
+    for result in search_results:
+        print(f"ID: {result.id} \n ----> Distance: {result.score}\n")
 
 def main():
-    clear_redis_store()
-    create_hnsw_index()
+    clear_qdrant_store()
+    create_qdrant_collection()
 
     process_pdfs("../data/")
     print("\n---Done processing PDFs---\n")
-    query_redis("What is the capital of France?")
+    query_qdrant("What is the capital of France?")
 
 
 if __name__ == "__main__":
