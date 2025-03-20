@@ -1,71 +1,56 @@
-import redis
 import json
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, Filter, ScoredPoint
 import ollama
-from redis.commands.search.query import Query
-from redis.commands.search.field import VectorField, TextField
 
+# Initialize Qdrant Client (Replace with your Qdrant instance details)
+qdrant_client = QdrantClient(host="localhost", port=6333)
 
-# Initialize models
-# embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-redis_client = redis.StrictRedis(host="localhost", port=6379, decode_responses=True)
-
+# Constants
 VECTOR_DIM = 768
-INDEX_NAME = "embedding_index"
-DOC_PREFIX = "doc:"
-DISTANCE_METRIC = "COSINE"
+COLLECTION_NAME = "embedding_collection"
 
-# def cosine_similarity(vec1, vec2):
-#     """Calculate cosine similarity between two vectors."""
-#     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+# Ensure the collection exists (create if needed)
+qdrant_client.recreate_collection(
+    collection_name=COLLECTION_NAME,
+    vectors_config={"size": VECTOR_DIM, "distance": "Cosine"},
+)
 
 
 def get_embedding(text: str, model: str = "nomic-embed-text") -> list:
-
+    """Generate an embedding for the given text."""
     response = ollama.embeddings(model=model, prompt=text)
     return response["embedding"]
 
 
 def search_embeddings(query, top_k=3):
-
+    """Search for the most similar embeddings in Qdrant."""
     query_embedding = get_embedding(query)
 
-    # Convert embedding to bytes for Redis search
-    query_vector = np.array(query_embedding, dtype=np.float32).tobytes()
-
     try:
-        # Construct the vector similarity search query
-        # Use a more standard RediSearch vector search syntax
-        # q = Query("*").sort_by("embedding", query_vector)
-
-        q = (
-            Query("*=>[KNN 5 @embedding $vec AS vector_distance]")
-            .sort_by("vector_distance")
-            .return_fields("id", "file", "page", "chunk", "vector_distance")
-            .dialect(2)
+        # Perform the vector search in Qdrant
+        search_results = qdrant_client.query_points(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_embedding,
+            limit=top_k,  # Get the top K results
         )
 
-        # Perform the search
-        results = redis_client.ft(INDEX_NAME).search(
-            q, query_params={"vec": query_vector}
-        )
-
-        # Transform results into the expected format
+        # Process search results
         top_results = [
             {
-                "file": result.file,
-                "page": result.page,
-                "chunk": result.chunk,
-                "similarity": result.vector_distance,
+                "file": result.payload.get("file", "Unknown file"),
+                "page": result.payload.get("page", "Unknown page"),
+                "chunk": result.payload.get("chunk", "Unknown chunk"),
+                "similarity": result.score,  # Cosine similarity score
             }
-            for result in results.docs
-        ][:top_k]
+            for result in search_results
+        ]
 
         # Print results for debugging
         for result in top_results:
             print(
-                f"---> File: {result['file']}, Page: {result['page']}, Chunk: {result['chunk']}"
+                f"---> File: {result['file']}, Page: {result['page']}, Chunk: {result['chunk']}, Similarity: {result['similarity']:.4f}"
             )
 
         return top_results
@@ -76,8 +61,7 @@ def search_embeddings(query, top_k=3):
 
 
 def generate_rag_response(query, context_results):
-
-    # Prepare context string
+    """Generate a response using retrieved context."""
     context_str = "\n".join(
         [
             f"From {result.get('file', 'Unknown file')} (page {result.get('page', 'Unknown page')}, chunk {result.get('chunk', 'Unknown chunk')}) "
@@ -88,7 +72,6 @@ def generate_rag_response(query, context_results):
 
     print(f"context_str: {context_str}")
 
-    # Construct prompt with context
     prompt = f"""You are a helpful AI assistant. 
     Use the following context to answer the query as accurately as possible. If the context is 
     not relevant to the query, say 'I don't know'.
@@ -100,7 +83,6 @@ Query: {query}
 
 Answer:"""
 
-    # Generate response using Ollama
     response = ollama.chat(
         model="llama3.2:latest", messages=[{"role": "user", "content": prompt}]
     )
@@ -127,7 +109,6 @@ def interactive_search():
 
         print("\n--- Response ---")
         print(response)
-
 
 
 if __name__ == "__main__":
